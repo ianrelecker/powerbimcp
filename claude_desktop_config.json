@@ -1,0 +1,22 @@
+{
+  "preferences": {
+    "coworkScheduledTasksEnabled": false,
+    "coworkWebSearchEnabled": true,
+    "ccdScheduledTasksEnabled": false
+  },
+  "mcpServers": {
+    "powerbi": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "C:\\Users\\YOUR_WINDOWS_USER\\Documents\\powerbimcp",
+        "run",
+        "--env-file",
+        ".env",
+        "mcp",
+        "run",
+        "src/powerbi_mcp/server.py"
+      ]
+    }
+  }
+}

@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling>=1.25.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "claude-powerbi-mcp"
+version = "0.1.0"
+description = "Local MCP server for delegated Power BI dashboard access through the Power BI REST API."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "cryptography>=42.0.0",
+  "httpx>=0.27.0",
+  "mcp[cli]>=1.27.0",
+  "python-dotenv>=1.0.1",
+  "starlette>=0.37.2",
+  "uvicorn>=0.30.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3.0",
+]
+
+[project.scripts]
+powerbi-mcp = "powerbi_mcp.server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/powerbi_mcp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
