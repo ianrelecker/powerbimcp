@@ -9,8 +9,20 @@ from uuid import uuid4
 
 import httpx
 
-from .config import AppConfig, POWERBI_SCOPE_PREFIX
-from .models import AccountInfo, MicrosoftConnectionStatus, StoredMicrosoftTokens
+from .config import (
+    FABRIC_RESOURCE,
+    FABRIC_SCOPE_PREFIX,
+    POWERBI_RESOURCE,
+    POWERBI_SCOPE_PREFIX,
+    AppConfig,
+)
+from .models import (
+    AccountInfo,
+    MicrosoftConnectionStatus,
+    ResourceScopeStatus,
+    StoredMicrosoftTokens,
+    StoredResourceToken,
+)
 from .token_store import EncryptedFileStore
 
 
@@ -97,7 +109,9 @@ class MicrosoftAuthService:
                 "grant_type": "authorization_code",
                 "code": code,
                 "redirect_uri": self._config.entra.redirectUri,
-                "scope": " ".join(self._config.entra.scopes),
+                "scope": " ".join(
+                    self._resource_scopes(POWERBI_RESOURCE, include_oidc=True)
+                ),
             }
         )
 
@@ -107,62 +121,116 @@ class MicrosoftAuthService:
                 "Microsoft did not return a refresh token. Make sure offline_access is granted."
             )
 
-        await self._save_token_response(token_response, refresh_token)
+        await self._save_token_response(
+            token_response,
+            refresh_token,
+            resource=POWERBI_RESOURCE,
+        )
 
-    async def get_access_token(self) -> str:
+        try:
+            await self.get_access_token(FABRIC_RESOURCE)
+        except Exception:
+            # Status reports the missing Fabric token separately; keep the base
+            # Power BI connection usable when only that consent succeeds.
+            return
+
+    async def get_access_token(self, resource: str = POWERBI_RESOURCE) -> str:
+        token = await self.get_access_token_record(resource)
+        return token.accessToken
+
+    async def get_access_token_record(
+        self,
+        resource: str = POWERBI_RESOURCE,
+    ) -> StoredResourceToken:
         tokens = await self._load_tokens()
         if tokens is None:
             raise RuntimeError(
                 "Power BI is not connected yet. Visit /auth/microsoft/start first."
             )
 
-        if tokens.expiresAt > int(time.time() * 1000) + 60_000:
-            return tokens.accessToken
+        existing_token = self._resource_token(tokens, resource)
+        if (
+            existing_token is not None
+            and existing_token.expiresAt > int(time.time() * 1000) + 60_000
+        ):
+            return existing_token
 
         refreshed = await self._fetch_token(
             {
                 "grant_type": "refresh_token",
                 "refresh_token": tokens.refreshToken,
-                "scope": " ".join(self._config.entra.scopes),
+                "scope": " ".join(self._resource_scopes(resource)),
             }
         )
 
-        await self._save_token_response(
+        saved = await self._save_token_response(
             refreshed,
             refreshed.get("refresh_token") or tokens.refreshToken,
+            resource=resource,
         )
-
-        return str(refreshed["access_token"])
+        token = self._resource_token(saved, resource)
+        if token is None:  # pragma: no cover - defensive
+            raise RuntimeError(f"Microsoft did not return a {resource} access token")
+        return token
 
     async def disconnect(self) -> None:
         await self._token_store.clear()
 
     async def get_status(self) -> MicrosoftConnectionStatus:
-        required_scopes = self._config.entra.scopes
         tokens = await self._load_tokens()
-        if tokens is None:
-            return MicrosoftConnectionStatus(
-                connected=False,
-                knownWorkspaces=self._config.knownWorkspaces,
-                requiredScopes=required_scopes,
-                grantedScopes=[],
-                missingScopes=required_scopes,
-            )
+        resource_statuses = [
+            self._resource_status(resource, tokens)
+            for resource in (POWERBI_RESOURCE, FABRIC_RESOURCE)
+        ]
+        required_scopes = [
+            scope
+            for status in resource_statuses
+            for scope in status.requiredScopes
+        ]
+        granted_scopes = [
+            scope
+            for status in resource_statuses
+            for scope in status.grantedScopes
+        ]
+        missing_scopes = [
+            scope
+            for status in resource_statuses
+            for scope in status.missingScopes
+        ]
+        expires_at_values = [
+            status.expiresAt
+            for status in resource_statuses
+            if status.expiresAt is not None
+        ]
 
-        granted_scopes = self._parse_scope_string(tokens.scope)
         return MicrosoftConnectionStatus(
-            connected=True,
-            account=tokens.account,
-            expiresAt=tokens.expiresAt,
+            connected=tokens is not None,
+            account=tokens.account if tokens else None,
+            expiresAt=min(expires_at_values) if expires_at_values else None,
             knownWorkspaces=self._config.knownWorkspaces,
             requiredScopes=required_scopes,
             grantedScopes=granted_scopes,
-            missingScopes=self._missing_scopes(required_scopes, granted_scopes),
+            missingScopes=missing_scopes,
+            resourceStatuses=resource_statuses,
         )
 
     async def _load_tokens(self) -> StoredMicrosoftTokens | None:
         raw = await self._token_store.load()
-        return StoredMicrosoftTokens.model_validate(raw) if raw else None
+        if not raw:
+            return None
+
+        tokens = StoredMicrosoftTokens.model_validate(raw)
+        if tokens.accessToken and tokens.expiresAt and tokens.scope:
+            tokens.accessTokens.setdefault(
+                POWERBI_RESOURCE,
+                StoredResourceToken(
+                    accessToken=tokens.accessToken,
+                    expiresAt=tokens.expiresAt,
+                    scope=tokens.scope,
+                    updatedAt=tokens.updatedAt,
+                ),
+            )
+        return tokens
 
     async def _fetch_token(self, payload: dict[str, str]) -> dict[str, Any]:
         token_url = (
@@ -196,6 +264,45 @@ class MicrosoftAuthService:
 
         return data
 
+    def _resource_scopes(self, resource: str, *, include_oidc: bool = False) -> list[str]:
+        scopes = list(self._config.entra.oidcScopes) if include_oidc else []
+        if resource == POWERBI_RESOURCE:
+            scopes.extend(self._config.entra.powerbiScopes)
+        elif resource == FABRIC_RESOURCE:
+            scopes.extend(self._config.entra.fabricScopes)
+        else:  # pragma: no cover - defensive
+            raise ValueError(f"Unknown Microsoft token resource: {resource}")
+        return scopes
+
+    def _resource_token(
+        self,
+        tokens: StoredMicrosoftTokens,
+        resource: str,
+    ) -> StoredResourceToken | None:
+        return tokens.accessTokens.get(resource)
+
+    def _resource_status(
+        self,
+        resource: str,
+        tokens: StoredMicrosoftTokens | None,
+    ) -> ResourceScopeStatus:
+        required_scopes = self._resource_scopes(resource)
+        token = self._resource_token(tokens, resource) if tokens is not None else None
+        granted_scopes = self._parse_scope_string(token.scope) if token else []
+
+        return ResourceScopeStatus(
+            resource=resource,
+            connected=token is not None,
+            expiresAt=token.expiresAt if token else None,
+            requiredScopes=required_scopes,
+            grantedScopes=granted_scopes,
+            missingScopes=(
+                required_scopes
+                if token is None
+                else self._missing_scopes(required_scopes, granted_scopes)
+            ),
+        )
+
     def _parse_scope_string(self, value: str) -> list[str]:
         return [scope for scope in value.split() if scope]
 
@@ -217,48 +324,69 @@ class MicrosoftAuthService:
 
     def _normalize_scope(self, scope: str) -> str:
         normalized = scope.lower()
-        if normalized.startswith(POWERBI_SCOPE_PREFIX):
-            return normalized.removeprefix(POWERBI_SCOPE_PREFIX)
+        for prefix in (POWERBI_SCOPE_PREFIX.lower(), FABRIC_SCOPE_PREFIX.lower()):
+            if normalized.startswith(prefix):
+                return normalized.removeprefix(prefix)
         return normalized
 
     async def _save_token_response(
         self,
         token_response: dict[str, Any],
         refresh_token: str,
-    ) -> None:
+        *,
+        resource: str,
+    ) -> StoredMicrosoftTokens:
+        existing = await self._load_tokens()
         claims = decode_id_claims(
             token_response.get("id_token")
             if isinstance(token_response.get("id_token"), str)
-            else None
+            else None,
         )
         expires_in = int(token_response.get("expires_in", 3600))
         expires_at = int(time.time() * 1000) + expires_in * 1000
 
-        account = AccountInfo(
-            name=claims.get("name") if claims else None,
-            preferredUsername=(
-                claims.get("preferred_username")
-                or claims.get("upn")
-                or claims.get("email")
+        account = (
+            AccountInfo(
+                name=claims.get("name") if claims else None,
+                preferredUsername=(
+                    claims.get("preferred_username")
+                    or claims.get("upn")
+                    or claims.get("email")
+                )
+                if claims
+                else None,
+                oid=claims.get("oid") if claims else None,
+                tid=claims.get("tid") if claims else None,
             )
             if claims
-            else None,
-            oid=claims.get("oid") if claims else None,
-            tid=claims.get("tid") if claims else None,
+            else existing.account
+            if existing
+            else None
+        )
+        access_tokens = dict(existing.accessTokens) if existing else {}
+        updated_at = int(time.time() * 1000)
+        access_tokens[resource] = StoredResourceToken(
+            accessToken=str(token_response["access_token"]),
+            expiresAt=expires_at,
+            scope=str(token_response.get("scope") or " ".join(self._resource_scopes(resource))),
+            updatedAt=updated_at,
         )
 
         tokens = StoredMicrosoftTokens(
-            accessToken=str(token_response["access_token"]),
             refreshToken=refresh_token,
-            expiresAt=expires_at,
-            scope=str(token_response.get("scope") or " ".join(self._config.entra.scopes)),
+            accessTokens=access_tokens,
             idToken=(
                 str(token_response["id_token"])
                 if token_response.get("id_token") is not None
+                else existing.idToken
+                if existing
                 else None
             ),
             account=account,
-            updatedAt=int(time.time() * 1000),
+            updatedAt=updated_at,
         )
 
-        await self._token_store.save(tokens.model_dump(mode="json", by_alias=True))
+        await self._token_store.save(
+            tokens.model_dump(mode="json", by_alias=True, exclude_none=True)
+        )
+        return tokens

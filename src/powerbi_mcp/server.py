@@ -4,6 +4,7 @@ import sys
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urljoin
 
 import anyio
@@ -12,6 +13,7 @@ import uvicorn
 from mcp.server.fastmcp import FastMCP
 
 from powerbi_mcp.config import AppConfig, load_config
+from powerbi_mcp.fabric_api import FabricClient
 from powerbi_mcp.helper_app import create_helper_app
 from powerbi_mcp.microsoft_auth import MicrosoftAuthService
 from powerbi_mcp.models import (
@@ -27,12 +29,18 @@ from powerbi_mcp.models import (
     RefreshHistoryResult,
     ReportListResult,
     ReportResult,
+    SemanticModelListResult,
+    SemanticModelResult,
     TileListResult,
     TileResult,
     WorkspaceListResult,
     WorkspaceResult,
+    XmlaAttachResult,
+    XmlaExecuteResult,
+    XmlaQueryResult,
 )
 from powerbi_mcp.powerbi_api import PowerBIClient
+from powerbi_mcp.xmla import PowerBIXMLAClient
 
 
 CAPABILITIES_PATH = Path(__file__).parents[2] / "POWERBI_MCP_CAPABILITIES.md"
@@ -43,6 +51,8 @@ class RuntimeServices:
     config: AppConfig
     microsoft_auth: MicrosoftAuthService
     powerbi: PowerBIClient
+    fabric: FabricClient
+    xmla: PowerBIXMLAClient
     http_client: httpx.AsyncClient
     owns_http_client: bool = False
     start_helper_server: bool = True
@@ -61,10 +71,14 @@ def create_runtime(
     )
     auth = MicrosoftAuthService(resolved_config, resolved_http_client)
     powerbi = PowerBIClient(auth, resolved_http_client)
+    fabric = FabricClient(auth, resolved_http_client)
+    xmla = PowerBIXMLAClient(resolved_config, auth, powerbi, fabric)
     return RuntimeServices(
         config=resolved_config,
         microsoft_auth=auth,
         powerbi=powerbi,
+        fabric=fabric,
+        xmla=xmla,
         http_client=resolved_http_client,
         owns_http_client=http_client is None,
         start_helper_server=start_helper_server,
@@ -235,6 +249,7 @@ def _create_server(runtime_provider: _RuntimeProvider) -> FastMCP:
             requiredScopes=status.requiredScopes,
             grantedScopes=status.grantedScopes,
             missingScopes=status.missingScopes,
+            resourceStatuses=status.resourceStatuses,
             localStatusUrl=runtime.config.localBaseUrl,
             microsoftConnectUrl=urljoin(
                 runtime.config.localBaseUrl, "/auth/microsoft/start"
@@ -413,6 +428,38 @@ def _create_server(runtime_provider: _RuntimeProvider) -> FastMCP:
         )
 
     @mcp.tool(
+        name="powerbi_list_semantic_models",
+        description="List Fabric semantic models in a Power BI/Fabric workspace.",
+    )
+    async def powerbi_list_semantic_models(
+        workspaceId: str,
+        continuationToken: str | None = None,
+        recursive: bool = True,
+        rootFolderId: str | None = None,
+    ) -> SemanticModelListResult:
+        runtime = runtime_provider.get()
+        return await runtime.fabric.list_semantic_models(
+            workspaceId=workspaceId,
+            continuationToken=continuationToken,
+            recursive=recursive,
+            rootFolderId=rootFolderId,
+        )
+
+    @mcp.tool(
+        name="powerbi_get_semantic_model",
+        description="Get one Fabric semantic model by workspace ID and semantic model ID.",
+    )
+    async def powerbi_get_semantic_model(
+        workspaceId: str,
+        semanticModelId: str,
+    ) -> SemanticModelResult:
+        runtime = runtime_provider.get()
+        return await runtime.fabric.get_semantic_model(
+            workspaceId=workspaceId,
+            semanticModelId=semanticModelId,
+        )
+
+    @mcp.tool(
         name="powerbi_list_dataset_datasources",
         description="List data sources configured for a dataset.",
     )
@@ -440,6 +487,80 @@ def _create_server(runtime_provider: _RuntimeProvider) -> FastMCP:
             workspaceId=workspaceId,
             datasetId=datasetId,
             top=top,
+        )
+
+    @mcp.tool(
+        name="powerbi_xmla_attach",
+        description=(
+            "Resolve and validate a Premium Power BI XMLA endpoint attachment "
+            "for a semantic model."
+        ),
+    )
+    async def powerbi_xmla_attach(
+        workspaceId: str,
+        semanticModelId: str | None = None,
+        semanticModelName: str | None = None,
+        tenantAlias: str | None = None,
+        validate: bool = True,
+    ) -> XmlaAttachResult:
+        runtime = runtime_provider.get()
+        return await runtime.xmla.attach(
+            workspaceId=workspaceId,
+            semanticModelId=semanticModelId,
+            semanticModelName=semanticModelName,
+            tenantAlias=tenantAlias,
+            validate=validate,
+        )
+
+    @mcp.tool(
+        name="powerbi_xmla_query",
+        description="Run a DAX, MDX, or DMV read query through the Premium XMLA endpoint.",
+    )
+    async def powerbi_xmla_query(
+        workspaceId: str,
+        query: str,
+        semanticModelId: str | None = None,
+        semanticModelName: str | None = None,
+        queryType: Literal["dax", "mdx", "dmv"] = "dax",
+        tenantAlias: str | None = None,
+        maxRows: int = 500,
+    ) -> XmlaQueryResult:
+        runtime = runtime_provider.get()
+        return await runtime.xmla.query(
+            workspaceId=workspaceId,
+            semanticModelId=semanticModelId,
+            semanticModelName=semanticModelName,
+            tenantAlias=tenantAlias,
+            query=query,
+            queryType=queryType,
+            maxRows=maxRows,
+        )
+
+    @mcp.tool(
+        name="powerbi_xmla_execute",
+        description=(
+            "Execute an XMLA/TMSL write command through the Premium XMLA endpoint. "
+            "Requires POWERBI_XMLA_ALLOW_WRITES=true and exact confirmation text."
+        ),
+    )
+    async def powerbi_xmla_execute(
+        workspaceId: str,
+        commandText: str,
+        semanticModelId: str | None = None,
+        semanticModelName: str | None = None,
+        commandType: Literal["xmla", "tmsl"] = "xmla",
+        tenantAlias: str | None = None,
+        confirmation: str | None = None,
+    ) -> XmlaExecuteResult:
+        runtime = runtime_provider.get()
+        return await runtime.xmla.execute(
+            workspaceId=workspaceId,
+            semanticModelId=semanticModelId,
+            semanticModelName=semanticModelName,
+            tenantAlias=tenantAlias,
+            commandText=commandText,
+            commandType=commandType,
+            confirmation=confirmation,
         )
 
     return mcp

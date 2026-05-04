@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "claude-powerbi-mcp"
 version = "0.1.0"
-description = "Local MCP server for delegated Power BI dashboard access through the Power BI REST API."
+description = "Local MCP server for delegated Power BI REST, Fabric semantic model, and Premium XMLA access."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
