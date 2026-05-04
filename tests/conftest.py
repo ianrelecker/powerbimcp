@@ -7,7 +7,13 @@ from pathlib import Path
 
 import pytest
 
-from powerbi_mcp.config import AppConfig, DEFAULT_POWERBI_SCOPES, EntraConfig
+from powerbi_mcp.config import (
+    DEFAULT_FABRIC_RESOURCE_SCOPES,
+    DEFAULT_OPENID_SCOPES,
+    DEFAULT_POWERBI_RESOURCE_SCOPES,
+    AppConfig,
+    EntraConfig,
+)
 
 TEST_KEY = bytes(range(32))
 TEST_KEY_B64 = base64.b64encode(TEST_KEY).decode("ascii")
@@ -51,8 +57,23 @@ def config_factory(
                     f"{local_base_url}/auth/microsoft/callback",
                 )
             ),
-            scopes=list(overrides.pop("scopes", DEFAULT_POWERBI_SCOPES)),
+            oidcScopes=list(overrides.pop("oidcScopes", DEFAULT_OPENID_SCOPES)),
+            powerbiScopes=list(
+                overrides.pop("powerbiScopes", DEFAULT_POWERBI_RESOURCE_SCOPES)
+            ),
+            fabricScopes=list(
+                overrides.pop("fabricScopes", DEFAULT_FABRIC_RESOURCE_SCOPES)
+            ),
         )
+        xmla_bridge_path = Path(
+            overrides.pop(
+                "xmlaBridgePath",
+                Path("xmla_bridge/PowerBIXmlaBridge/PowerBIXmlaBridge.csproj"),
+            )
+        )
+        xmla_tenant_alias = str(overrides.pop("xmlaTenantAlias", "myorg"))
+        xmla_allow_writes = bool(overrides.pop("xmlaAllowWrites", False))
+        xmla_bridge_timeout = int(overrides.pop("xmlaBridgeTimeoutSeconds", 60))
 
         if overrides:
             raise AssertionError(f"Unexpected config overrides: {sorted(overrides)}")
@@ -64,6 +85,10 @@ def config_factory(
             encryptionKey=TEST_KEY,
             knownWorkspaces=["Sales Workspace"],
             tokenFile=token_file,
+            xmlaBridgePath=xmla_bridge_path,
+            xmlaTenantAlias=xmla_tenant_alias,
+            xmlaAllowWrites=xmla_allow_writes,
+            xmlaBridgeTimeoutSeconds=xmla_bridge_timeout,
         )
 
     return factory

@@ -15,8 +15,13 @@ from powerbi_mcp.models import (
     DashboardListResult,
     DatasetInfo,
     MicrosoftConnectionStatus,
+    ResourceScopeStatus,
+    SemanticModelInfo,
+    SemanticModelListResult,
     TileInfo,
     TileListResult,
+    XmlaAttachResult,
+    XmlaQueryResult,
 )
 from powerbi_mcp.server import RuntimeServices, _can_bind_localhost, create_mcp_server
 
@@ -28,6 +33,32 @@ class StubAuthService:
             account=AccountInfo(preferredUsername="user@example.com"),
             expiresAt=1712345678901,
             knownWorkspaces=["Sales Workspace"],
+            resourceStatuses=[
+                ResourceScopeStatus(
+                    resource="powerbi",
+                    connected=True,
+                    expiresAt=1712345678901,
+                    requiredScopes=[
+                        "https://analysis.windows.net/powerbi/api/Dataset.ReadWrite.All"
+                    ],
+                    grantedScopes=[
+                        "Dataset.ReadWrite.All"
+                    ],
+                ),
+                ResourceScopeStatus(
+                    resource="fabric",
+                    connected=True,
+                    expiresAt=1712345678901,
+                    requiredScopes=[
+                        "https://api.fabric.microsoft.com/Workspace.Read.All",
+                        "https://api.fabric.microsoft.com/SemanticModel.Read.All"
+                    ],
+                    grantedScopes=[
+                        "Workspace.Read.All",
+                        "SemanticModel.Read.All"
+                    ],
+                ),
+            ],
         )
 
 
@@ -95,6 +126,58 @@ class StubPowerBIClient:
         raise AssertionError("Not expected in this test")
 
 
+class StubFabricClient:
+    async def list_semantic_models(self, **kwargs) -> SemanticModelListResult:
+        return SemanticModelListResult(
+            workspaceId=kwargs["workspaceId"],
+            semanticModels=[
+                SemanticModelInfo(
+                    id="semantic-1",
+                    displayName="Sales Model",
+                    type="SemanticModel",
+                    workspaceId=kwargs["workspaceId"],
+                )
+            ],
+        )
+
+    async def get_semantic_model(self, **kwargs):
+        raise AssertionError("Not expected in this test")
+
+
+class StubXMLAClient:
+    async def attach(self, **kwargs) -> XmlaAttachResult:
+        return XmlaAttachResult(
+            workspaceId=kwargs["workspaceId"],
+            workspaceName="Sales Workspace",
+            semanticModelId=kwargs["semanticModelId"] or "semantic-1",
+            semanticModelName=kwargs["semanticModelName"] or "Sales Model",
+            tenantAlias=kwargs["tenantAlias"] or "myorg",
+            serverUrl="powerbi://api.powerbi.com/v1.0/myorg/Sales%20Workspace",
+            initialCatalog=kwargs["semanticModelName"] or "Sales Model",
+            alternateServerUrl=None,
+            alternateInitialCatalog=None,
+            effectiveServerUrl="powerbi://api.powerbi.com/v1.0/myorg/Sales%20Workspace",
+            effectiveInitialCatalog=kwargs["semanticModelName"] or "Sales Model",
+            validated=True,
+            writeEnabled=False,
+            requirements=[],
+        )
+
+    async def query(self, **kwargs) -> XmlaQueryResult:
+        attach = await self.attach(**kwargs)
+        return XmlaQueryResult(
+            attach=attach,
+            queryType=kwargs["queryType"],
+            columns=["Metric"],
+            rows=[{"Metric": 1}],
+            rowCount=1,
+            truncated=False,
+        )
+
+    async def execute(self, **kwargs):
+        raise AssertionError("Not expected in this test")
+
+
 @pytest.mark.anyio
 async def test_mcp_server_exposes_expected_tools_and_structured_outputs(config_factory) -> None:
     powerbi = StubPowerBIClient()
@@ -103,6 +186,8 @@ async def test_mcp_server_exposes_expected_tools_and_structured_outputs(config_f
         config=config_factory(localBaseUrl="http://localhost:8787"),
         microsoft_auth=StubAuthService(),
         powerbi=powerbi,
+        fabric=StubFabricClient(),
+        xmla=StubXMLAClient(),
         http_client=http_client,
         owns_http_client=False,
         start_helper_server=False,
@@ -126,8 +211,13 @@ async def test_mcp_server_exposes_expected_tools_and_structured_outputs(config_f
             "powerbi_get_report",
             "powerbi_list_datasets",
             "powerbi_get_dataset",
+            "powerbi_list_semantic_models",
+            "powerbi_get_semantic_model",
             "powerbi_list_dataset_datasources",
             "powerbi_get_refresh_history",
+            "powerbi_xmla_attach",
+            "powerbi_xmla_query",
+            "powerbi_xmla_execute",
         }
 
         resources = await session.list_resources()
@@ -147,6 +237,32 @@ async def test_mcp_server_exposes_expected_tools_and_structured_outputs(config_f
             account=AccountInfo(preferredUsername="user@example.com"),
             expiresAt=1712345678901,
             knownWorkspaces=["Sales Workspace"],
+            resourceStatuses=[
+                ResourceScopeStatus(
+                    resource="powerbi",
+                    connected=True,
+                    expiresAt=1712345678901,
+                    requiredScopes=[
+                        "https://analysis.windows.net/powerbi/api/Dataset.ReadWrite.All"
+                    ],
+                    grantedScopes=[
+                        "Dataset.ReadWrite.All"
+                    ],
+                ),
+                ResourceScopeStatus(
+                    resource="fabric",
+                    connected=True,
+                    expiresAt=1712345678901,
+                    requiredScopes=[
+                        "https://api.fabric.microsoft.com/Workspace.Read.All",
+                        "https://api.fabric.microsoft.com/SemanticModel.Read.All"
+                    ],
+                    grantedScopes=[
+                        "Workspace.Read.All",
+                        "SemanticModel.Read.All"
+                    ],
+                ),
+            ],
             localStatusUrl="http://localhost:8787",
             microsoftConnectUrl="http://localhost:8787/auth/microsoft/start",
             microsoftDisconnectUrl="http://localhost:8787/auth/microsoft/disconnect",
@@ -164,6 +280,28 @@ async def test_mcp_server_exposes_expected_tools_and_structured_outputs(config_f
             {"workspaceId": "workspace-1", "dashboardId": "dashboard-1"},
         )
         assert tiles.structuredContent["tiles"][0]["title"] == "Revenue"
+
+        semantic_models = await session.call_tool(
+            "powerbi_list_semantic_models",
+            {"workspaceId": "workspace-1"},
+        )
+        assert semantic_models.structuredContent["semanticModels"][0]["displayName"] == "Sales Model"
+
+        attach = await session.call_tool(
+            "powerbi_xmla_attach",
+            {"workspaceId": "workspace-1", "semanticModelName": "Sales Model"},
+        )
+        assert attach.structuredContent["validated"] is True
+
+        query = await session.call_tool(
+            "powerbi_xmla_query",
+            {
+                "workspaceId": "workspace-1",
+                "semanticModelName": "Sales Model",
+                "query": "EVALUATE ROW(\"Metric\", 1)",
+            },
+        )
+        assert query.structuredContent["rows"][0]["Metric"] == 1
 
     await http_client.aclose()
 
@@ -205,6 +343,8 @@ async def test_mcp_server_stays_up_when_helper_port_is_busy(config_factory) -> N
         ),
         microsoft_auth=StubAuthService(),
         powerbi=StubPowerBIClient(),
+        fabric=StubFabricClient(),
+        xmla=StubXMLAClient(),
         http_client=http_client,
         owns_http_client=False,
         start_helper_server=True,

@@ -34,6 +34,18 @@ def render_home_page(config: AppConfig, status_text: dict[str, object]) -> str:
         if status_text["knownWorkspaces"]
         else "<p>No workspace hints configured.</p>"
     )
+    resource_statuses = "".join(
+        "<li>"
+        f"<strong>{escape(str(status['resource']))}</strong>: "
+        f"{'connected' if status['connected'] else 'not connected'}"
+        + (
+            f" ({len(status['missingScopes'])} missing scope(s))"
+            if status["missingScopes"]
+            else ""
+        )
+        + "</li>"
+        for status in status_text["resourceStatuses"]
+    )
 
     return f"""<!doctype html>
 <html lang="en">
@@ -63,6 +75,7 @@ def render_home_page(config: AppConfig, status_text: dict[str, object]) -> str:
       <section>
         <h2>Microsoft Delegated Auth</h2>
         {connected}
+        <ul>{resource_statuses}</ul>
         <p>
           <a class="button" href="/auth/microsoft/start">Connect Power BI</a>
           <a class="button" href="/auth/microsoft/disconnect">Disconnect Power BI</a>
@@ -94,6 +107,14 @@ def create_helper_app(config: AppConfig, microsoft_auth: MicrosoftAuthService) -
                     "connected": status.connected,
                     "preferredUsername": status.account.preferredUsername if status.account else None,
                     "knownWorkspaces": status.knownWorkspaces,
+                    "resourceStatuses": [
+                        {
+                            "resource": resource.resource,
+                            "connected": resource.connected,
+                            "missingScopes": resource.missingScopes,
+                        }
+                        for resource in status.resourceStatuses
+                    ],
                 },
             )
         )
@@ -106,6 +127,10 @@ def create_helper_app(config: AppConfig, microsoft_auth: MicrosoftAuthService) -
                 "microsoftConnected": status.connected,
                 "localBaseUrl": config.localBaseUrl,
                 "microsoftRedirectUri": config.entra.redirectUri,
+                "resources": [
+                    resource.model_dump(mode="json")
+                    for resource in status.resourceStatuses
+                ],
             }
         )
 
