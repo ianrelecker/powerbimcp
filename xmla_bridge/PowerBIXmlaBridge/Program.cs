@@ -1,8 +1,7 @@
 using System.Data;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using AdomdAccessToken = Microsoft.AnalysisServices.AdomdClient.AccessToken;
-using AmoAccessToken = Microsoft.AnalysisServices.AccessToken;
+using AnalysisServicesAccessToken = Microsoft.AnalysisServices.AccessToken;
 using AmoServer = Microsoft.AnalysisServices.Server;
 using Microsoft.AnalysisServices.AdomdClient;
 
@@ -91,7 +90,7 @@ static BridgeResponse Query(BridgeRequest request)
 static BridgeResponse Execute(BridgeRequest request)
 {
     using var server = new AmoServer();
-    server.AccessToken = new AmoAccessToken(
+    server.AccessToken = new AnalysisServicesAccessToken(
         Require(request.AccessToken, "accessToken"),
         Expiration(request.AccessTokenExpiresAt)
     );
@@ -116,7 +115,7 @@ static AdomdConnection CreateAdomdConnection(BridgeRequest request)
 {
     var connection = new AdomdConnection(ConnectionString(request))
     {
-        AccessToken = new AdomdAccessToken(
+        AccessToken = new AnalysisServicesAccessToken(
             Require(request.AccessToken, "accessToken"),
             Expiration(request.AccessTokenExpiresAt)
         )
